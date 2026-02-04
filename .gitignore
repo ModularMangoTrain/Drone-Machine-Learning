@@ -5,7 +5,6 @@ LLVIP/
 KAIST/
 
 # Model files
-*.pth
 *.pt
 *.ckpt
 *.h5
