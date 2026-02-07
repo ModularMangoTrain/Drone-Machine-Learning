@@ -1,6 +1,8 @@
 import torch
 from torchvision import transforms
 from PIL import Image
+import cv2
+import time
 
 # REMOVED: All training-related imports (optim, DataLoader, datasets)
 # WHY: Pi only does inference, removing unused imports saves memory
@@ -8,7 +10,7 @@ from PIL import Image
 # CHANGED: Load full model instead of reconstructing architecture
 # WHY: Simpler code, no need to define model structure again
 # Just load the trained model directly from the file
-spatial = torch.load(r"c:\Users\shabd\Documents\AURORA\ML\spatial_person_detector_full.pth", map_location=torch.device('cpu'), weights_only=False)
+spatial = torch.load("spatial_person_detector_full.pth", map_location=torch.device('cpu'), weights_only=False)
 
 # CHANGED: Force CPU usage (removed CUDA check)
 # WHY: Raspberry Pi doesn't have CUDA/GPU, always uses CPU
@@ -38,32 +40,25 @@ preprocess = transforms.Compose([
 
 # CHANGED: Wrapped in a function for reusability
 # WHY: Easier to call repeatedly for real-time drone detection
-def detect_person(image_path):
+def detect_person(image):
     """
     Detect if a person is present in the image.
     
     Args:
-        image_path: Path to the image file
+        image: PIL Image or numpy array (from camera)
         
     Returns:
         prediction: "person" or "no_person"
         confidence: Probability score (0-1)
     """
-    image = Image.open(image_path)
-    input_tensor = preprocess(image)
-    
-    # CHANGED: Explicitly move to CPU (though already on CPU)
-    # WHY: Ensures compatibility, no accidental GPU calls
-    input_batch = input_tensor.unsqueeze(0).to(device)
-    
-    # ADDED: torch.no_grad() context
-    # WHY: Disables gradient calculation, saves memory and speeds up inference
-    # Critical for Pi's limited resources
-    with torch.no_grad():
+    with torch.inference_mode():
+        if not isinstance(image, Image.Image):
+            image = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+        
+        input_tensor = preprocess(image)
+        input_batch = input_tensor.unsqueeze(0).to(device)
         output = spatial(input_batch)
         
-        # ADDED: Softmax to get probabilities
-        # WHY: Provides confidence scores, useful for filtering uncertain detections
         probabilities = torch.nn.functional.softmax(output[0], dim=0)
         confidence, predicted_idx = torch.max(probabilities, 0)
     
@@ -72,22 +67,31 @@ def detect_person(image_path):
     
     return prediction, confidence.item()
 
-# Example usage
 if __name__ == "__main__":
-    # Put your test image in the same folder as this script
-    # Change 'test_image.jpg' to your actual image filename
-    import sys
+    cap = cv2.VideoCapture(0)
     
-    if len(sys.argv) > 1:
-        image_path = sys.argv[1]
-    else:
-        image_path = 'test_image.jpg'
+    if not cap.isOpened():
+        print("Error: Cannot open camera")
+        exit(1)
     
-    try:
-        prediction, confidence = detect_person(image_path)
-        print(f"Prediction: {prediction}")
-        print(f"Confidence: {confidence:.2%}")
-    except FileNotFoundError:
-        print(f"Error: Image '{image_path}' not found!")
-        print(f"Put a test image in: c:\\Users\\shabd\\Documents\\AURORA\\ML\\Drone-Machine-Learning\\")
-        print(f"Then run: python DroneML_pi_inference.py your_image.jpg")
+    print("Camera opened. Press 'q' to quit.")
+    
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            print("Error: Cannot read frame")
+            break
+        
+        prediction, confidence = detect_person(frame)
+        
+        color = (0, 255, 0) if prediction == "person" else (0, 0, 255)
+        text = f"{prediction}: {confidence:.2%}"
+        cv2.putText(frame, text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
+        
+        cv2.imshow('Person Detection', frame)
+        
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+    
+    cap.release()
+    cv2.destroyAllWindows()

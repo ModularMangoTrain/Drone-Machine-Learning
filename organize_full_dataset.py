@@ -1,5 +1,6 @@
 import shutil
 from pathlib import Path
+import random
 
 print("="*60)
 print("Organizing COCO for Full Dataset")
@@ -9,6 +10,9 @@ coco_path = Path(r'C:\Users\shabd\Documents\AURORA\val2017')
 all_images = list(coco_path.glob('*.jpg'))
 
 print(f"Found {len(all_images)} COCO images")
+
+random.seed(42)
+random.shuffle(all_images)
 
 # Use 80/20 split
 train_count = int(len(all_images) * 0.8)
@@ -36,6 +40,6 @@ for i, img in enumerate(val_images):
 print("\n" + "="*60)
 print("[OK] Full dataset ready!")
 print("="*60)
-print(f"Training no_person: {len(list(train_dest.glob('*.jpg')))} images")
-print(f"Validation no_person: {len(list(val_dest.glob('*.jpg')))} images")
+print(f"Training no_person: {len(train_images)} images")
+print(f"Validation no_person: {len(val_images)} images")
 print("\nNow run: python DroneML_train.py")

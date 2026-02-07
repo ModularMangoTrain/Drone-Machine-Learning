@@ -5,8 +5,15 @@ import torch.optim as optim
 from torchvision import transforms
 from torch.utils.data import DataLoader
 from torchvision import datasets
+import random
+import numpy as np
 
 if __name__ == '__main__':
+    torch.manual_seed(42)
+    random.seed(42)
+    np.random.seed(42)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(42)
     spatial = models.mobilenet_v2(weights='DEFAULT')
     
     num_classes = 2
@@ -31,7 +38,7 @@ if __name__ == '__main__':
     spatial.to(device)
     
     train_dataset = datasets.ImageFolder(root=r'C:\Users\shabd\Documents\AURORA\dataset\train', transform=preprocess)
-    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=0)
+    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=4)
     
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(spatial.parameters(), lr=0.001)
@@ -59,5 +66,5 @@ if __name__ == '__main__':
         
         print(f'Epoch [{epoch + 1}/{num_epochs}], Loss: {running_loss / len(train_loader):.4f}')
     
-    torch.save(spatial, "spatial_person_detector_full.pth")
+    torch.save(spatial.state_dict(), "spatial_person_detector_full.pth")
     print("Model saved successfully!")

@@ -32,6 +32,9 @@ val_images = all_images[1000:1300]
 train_dest = Path(r'C:\Users\shabd\Documents\AURORA\dataset_small\train\no_person')
 val_dest = Path(r'C:\Users\shabd\Documents\AURORA\dataset_small\val\no_person')
 
+train_dest.mkdir(parents=True, exist_ok=True)
+val_dest.mkdir(parents=True, exist_ok=True)
+
 print(f"\nCopying {len(train_images)} images to training...")
 for i, img in enumerate(train_images):
     shutil.copy(img, train_dest / img.name)
@@ -47,6 +50,6 @@ for i, img in enumerate(val_images):
 print("\n" + "="*60)
 print("[OK] Images organized!")
 print("="*60)
-print(f"Training no_person: {len(list(train_dest.glob('*.jpg')))} images")
-print(f"Validation no_person: {len(list(val_dest.glob('*.jpg')))} images")
+print(f"Training no_person: {len(train_images)} images")
+print(f"Validation no_person: {len(val_images)} images")
 print("Start training: python DroneML_train.py")
