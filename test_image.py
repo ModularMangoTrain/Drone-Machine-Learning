@@ -22,8 +22,19 @@ preprocess = transforms.Compose([
 def test_image(image_path):
     print(f"\nTesting: {image_path}")
     
-    # Load and preprocess image
-    image = Image.open(image_path).convert('RGB')
+    # Load image
+    image = Image.open(image_path)
+    
+    # Check if it's BGR (from OpenCV) or RGB
+    # OpenCV saves as BGR, so convert if needed
+    if image_path.startswith('frame_'):
+        # Saved from OpenCV, convert BGR to RGB
+        import numpy as np
+        img_array = np.array(image)
+        img_array = img_array[:, :, ::-1]  # BGR to RGB
+        image = Image.fromarray(img_array)
+    
+    image = image.convert('RGB')
     input_tensor = preprocess(image)
     input_batch = input_tensor.unsqueeze(0).to(device)
     
