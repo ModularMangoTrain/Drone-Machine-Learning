@@ -41,20 +41,11 @@ preprocess = transforms.Compose([
 # CHANGED: Wrapped in a function for reusability
 # WHY: Easier to call repeatedly for real-time drone detection
 def detect_person(image):
-    """
-    Detect if a person is present in the image.
-    
-    Args:
-        image: PIL Image or numpy array (from camera)
-        
-    Returns:
-        prediction: "person" or "no_person"
-        confidence: Probability score (0-1)
-    """
     with torch.inference_mode():
         if not isinstance(image, Image.Image):
-            if image.shape[2] == 4:
+            if len(image.shape) == 3 and image.shape[2] == 4:
                 image = image[:, :, :3]
+            # Picamera2 outputs RGB, convert directly to PIL
             image = Image.fromarray(image)
         
         input_tensor = preprocess(image)
@@ -67,7 +58,7 @@ def detect_person(image):
     classes = ["no_person", "person"]
     prediction = classes[predicted_idx.item()]
     
-    return prediction, confidence.item()
+    return prediction, confidence.item(), probabilities
 
 if __name__ == "__main__":
     picam2 = Picamera2()
@@ -76,27 +67,40 @@ if __name__ == "__main__":
     picam2.start()
     
     time.sleep(2)
-    print("Camera started. Press 'q' to quit.")
+    print("Camera started. Press 'q' to quit, 's' to save.")
+    frame_count = 0
     
     try:
         while True:
             frame = picam2.capture_array()
             
-            if frame.shape[2] == 4:
+            if len(frame.shape) == 3 and frame.shape[2] == 4:
                 frame = frame[:, :, :3]
             
             frame = np.ascontiguousarray(frame)
             
-            prediction, confidence = detect_person(frame)
+            prediction, confidence, probs = detect_person(frame)
+            
+            # Convert RGB to BGR for OpenCV display
+            display_frame = cv.cvtColor(frame, cv.COLOR_RGB2BGR)
             
             color = (0, 255, 0) if prediction == "person" else (0, 0, 255)
             text = f"{prediction}: {confidence:.1%}"
-            cv.putText(frame, text, (10, 30), cv.FONT_HERSHEY_SIMPLEX, 1, color, 2)
+            debug_text = f"no_p:{probs[0].item():.2f} p:{probs[1].item():.2f}"
             
-            cv.imshow('Person Detection', frame)
+            cv.putText(display_frame, text, (10, 30), cv.FONT_HERSHEY_SIMPLEX, 1, color, 2)
+            cv.putText(display_frame, debug_text, (10, 70), cv.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
             
-            if cv.waitKey(1) & 0xFF == ord('q'):
+            cv.imshow('Person Detection', display_frame)
+            
+            key = cv.waitKey(1) & 0xFF
+            if key == ord('q'):
                 break
+            elif key == ord('s'):
+                filename = f"frame_{frame_count}.jpg"
+                cv.imwrite(filename, display_frame)
+                print(f"Saved {filename}")
+                frame_count += 1
     
     except KeyboardInterrupt:
         print("\nStopping...")
