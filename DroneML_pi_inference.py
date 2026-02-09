@@ -1,16 +1,16 @@
 import torch
 from torchvision import transforms
 from PIL import Image
-import cv2
+import numpy as np
+from picamera2 import Picamera2
+import cv2 as cv
 import time
 
 # REMOVED: All training-related imports (optim, DataLoader, datasets)
 # WHY: Pi only does inference, removing unused imports saves memory
 
-# CHANGED: Load full model instead of reconstructing architecture
-# WHY: Simpler code, no need to define model structure again
-# Just load the trained model directly from the file
-spatial = torch.load("spatial_person_detector_full.pth", map_location=torch.device('cpu'), weights_only=False)
+# CHANGED: Load quantized model for faster inference on Pi
+spatial = torch.load("spatial_person_detector_quantized.pth", map_location=torch.device('cpu'), weights_only=False)
 
 # CHANGED: Force CPU usage (removed CUDA check)
 # WHY: Raspberry Pi doesn't have CUDA/GPU, always uses CPU
@@ -53,7 +53,9 @@ def detect_person(image):
     """
     with torch.inference_mode():
         if not isinstance(image, Image.Image):
-            image = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+            if image.shape[2] == 4:
+                image = image[:, :, :3]
+            image = Image.fromarray(image)
         
         input_tensor = preprocess(image)
         input_batch = input_tensor.unsqueeze(0).to(device)
@@ -68,30 +70,36 @@ def detect_person(image):
     return prediction, confidence.item()
 
 if __name__ == "__main__":
-    cap = cv2.VideoCapture(0)
+    picam2 = Picamera2()
+    config = picam2.create_preview_configuration(main={"size": (640, 480)})
+    picam2.configure(config)
+    picam2.start()
     
-    if not cap.isOpened():
-        print("Error: Cannot open camera")
-        exit(1)
+    time.sleep(2)
+    print("Camera started. Press 'q' to quit.")
     
-    print("Camera opened. Press 'q' to quit.")
+    try:
+        while True:
+            frame = picam2.capture_array()
+            
+            if frame.shape[2] == 4:
+                frame = frame[:, :, :3]
+            
+            frame = np.ascontiguousarray(frame)
+            
+            prediction, confidence = detect_person(frame)
+            
+            color = (0, 255, 0) if prediction == "person" else (0, 0, 255)
+            text = f"{prediction}: {confidence:.1%}"
+            cv.putText(frame, text, (10, 30), cv.FONT_HERSHEY_SIMPLEX, 1, color, 2)
+            
+            cv.imshow('Person Detection', frame)
+            
+            if cv.waitKey(1) & 0xFF == ord('q'):
+                break
     
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            print("Error: Cannot read frame")
-            break
-        
-        prediction, confidence = detect_person(frame)
-        
-        color = (0, 255, 0) if prediction == "person" else (0, 0, 255)
-        text = f"{prediction}: {confidence:.2%}"
-        cv2.putText(frame, text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
-        
-        cv2.imshow('Person Detection', frame)
-        
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
-    
-    cap.release()
-    cv2.destroyAllWindows()
+    except KeyboardInterrupt:
+        print("\nStopping...")
+    finally:
+        picam2.stop()
+        cv.destroyAllWindows()
