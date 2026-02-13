@@ -6,7 +6,6 @@ visdrone_base = Path("C:/Users/shabd/Documents/AURORA/VisDrone2019-DET-train")
 images_dir = visdrone_base / "images"
 annotations_dir = visdrone_base / "annotations"
 llvip_person_dir = Path("C:/Users/shabd/Documents/AURORA/dataset/train/person")
-
 output_base = Path("C:/Users/shabd/Documents/AURORA/dataset")
 person_train = output_base / "train" / "person"
 no_person_train = output_base / "train" / "no_person"
@@ -77,7 +76,7 @@ for ann_file in annotations_dir.glob("*.txt"):
 
 # Add LLVIP to match remaining
 llvip_count = 0
-max_llvip = max_person - person_count
+max_llvip = max_person // 3  # 1/3 LLVIP
 for img_path in llvip_person_dir.glob("*.jpg"):
     if llvip_count >= max_llvip:
         break
@@ -88,6 +87,23 @@ for img_path in llvip_person_dir.glob("*.jpg"):
     person_count += 1
     if llvip_count % 500 == 0:
         print(f"LLVIP person: {llvip_count}")
+
+# Add COCO ground-level person images
+coco_count = 0
+max_coco = max_person - person_count  # Remaining
+if coco_person_dir.exists():
+    for img_path in coco_person_dir.glob("*.jpg"):
+        if coco_count >= max_coco:
+            break
+        dest = person_train / f"coco_{img_path.name}"
+        if not dest.exists():
+            shutil.copy(img_path, dest)
+        coco_count += 1
+        person_count += 1
+        if coco_count % 500 == 0:
+            print(f"COCO person: {coco_count}")
+else:
+    print(f"Warning: {coco_person_dir} not found, skipping COCO images")
 
 print(f"\nFinal balanced dataset:")
 print(f"Person: {person_count}")
