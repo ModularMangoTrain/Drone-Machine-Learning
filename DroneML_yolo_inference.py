@@ -3,20 +3,56 @@ from picamera2 import Picamera2
 import cv2 as cv
 import time
 import numpy as np
+import threading
+from queue import Queue
 
-# Load YOLOv8-nano (smallest, fastest for Pi)
+# Load YOLOv8-nano model
 print("Loading YOLOv8-nano model...")
 model = YOLO('yolov8n.pt')
 
+# Configure Pi Camera HD for maximum FPS at full resolution
 picam2 = Picamera2()
-config = picam2.create_preview_configuration(main={"size": (640, 480)})
+config = picam2.create_preview_configuration(
+    main={"size": (1920, 1080)},  # Full HD resolution
+    controls={
+        "FrameRate": 30,           # Maximum FPS
+        "AeEnable": True,          # Auto-exposure enabled
+        "AwbEnable": True,         # Auto white balance
+        "Brightness": 0.1          # Slight brightness boost
+    }
+)
 picam2.configure(config)
 picam2.start()
 
 time.sleep(2)
-print("Search and Rescue Mode - Press 'q' to quit, 's' to save")
+
+# Debug: Check actual camera resolution
+test_frame = picam2.capture_array()
+print(f"Actual camera resolution: {test_frame.shape[1]}x{test_frame.shape[0]}")
+print("Full HD Search and Rescue Mode - Press 'q' to quit, 's' to save")
 
 frame_count = 0
+detection_counter = 0
+latest_detections = []
+
+# Threading for non-blocking detection
+detection_queue = Queue(maxsize=1)
+
+def detection_worker():
+    while True:
+        frame = detection_queue.get()
+        if frame is None:
+            break
+        
+        # Run YOLO detection on full HD frame
+        results = model(frame, classes=[0], verbose=False)
+        global latest_detections
+        latest_detections = results[0].boxes if results[0].boxes is not None else []
+        detection_queue.task_done()
+
+# Start detection thread
+detection_thread = threading.Thread(target=detection_worker, daemon=True)
+detection_thread.start()
 
 try:
     while True:
@@ -25,35 +61,44 @@ try:
         if len(frame.shape) == 3 and frame.shape[2] == 4:
             frame = frame[:, :, :3]
         
-        # Run YOLO detection
-        results = model(frame, classes=[0], verbose=False)  # class 0 = person
-        
-        # Get detections
-        boxes = results[0].boxes
-        person_count = len(boxes)
+        # Only run detection every frame
+        detection_counter += 1
+        if detection_queue.qsize() == 0:
+            detection_queue.put(frame.copy())
         
         # Convert RGB to BGR for display
         display_frame = cv.cvtColor(frame, cv.COLOR_RGB2BGR)
         
-        # Draw bounding boxes
-        for box in boxes:
+        # Use latest detections (from previous frames)
+        person_count = len(latest_detections)
+        
+        # Draw bounding boxes using latest detections
+        for box in latest_detections:
             x1, y1, x2, y2 = map(int, box.xyxy[0])
             conf = float(box.conf[0])
             
-            # Draw box
-            cv.rectangle(display_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            # Draw box with thicker lines for HD
+            cv.rectangle(display_frame, (x1, y1), (x2, y2), (0, 255, 0), 3)
             
-            # Draw label
+            # Draw label with larger font for HD
             label = f"Person {conf:.2f}"
-            cv.putText(display_frame, label, (x1, y1-10), 
-                      cv.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+            cv.putText(display_frame, label, (x1, y1-15), 
+                      cv.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 3)
         
-        # Display count
+        # Display count with larger text for HD
         status = f"SURVIVORS: {person_count}" if person_count > 0 else "SEARCHING..."
         color = (0, 255, 0) if person_count > 0 else (0, 0, 255)
-        cv.putText(display_frame, status, (10, 30), 
-                  cv.FONT_HERSHEY_SIMPLEX, 1, color, 2)
+        cv.putText(display_frame, status, (20, 60), 
+                  cv.FONT_HERSHEY_SIMPLEX, 2, color, 4)
         
+        # Show actual frame dimensions
+        info = f"Frame: {frame.shape[1]}x{frame.shape[0]} | Detection: Every 5th frame"
+        cv.putText(display_frame, info, (20, display_frame.shape[0]-30), 
+                  cv.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+        
+        # Create full-size window and display
+        cv.namedWindow('Search and Rescue', cv.WINDOW_NORMAL)
+        cv.resizeWindow('Search and Rescue', 1920, 1080)
         cv.imshow('Search and Rescue', display_frame)
         
         key = cv.waitKey(1) & 0xFF
@@ -68,5 +113,6 @@ try:
 except KeyboardInterrupt:
     pass
 finally:
+    detection_queue.put(None)  # Stop detection thread
     picam2.stop()
     cv.destroyAllWindows()

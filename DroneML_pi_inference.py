@@ -1,109 +1,158 @@
-import torch
-from torchvision import transforms
-from PIL import Image
-import numpy as np
+from ultralytics import YOLO
 from picamera2 import Picamera2
 import cv2 as cv
 import time
+import numpy as np
+import threading
+from queue import Queue
+import spidev
 
-# REMOVED: All training-related imports (optim, DataLoader, datasets)
-# WHY: Pi only does inference, removing unused imports saves memory
+# --- LED setup ---
+NUM_LEDS = 144
+_spi = spidev.SpiDev()
+_spi.open(0, 0)
+_spi.max_speed_hz = 3200000
+_spi.mode = 0
 
-# CHANGED: Load quantized model for faster inference on Pi
-spatial = torch.load("spatial_person_detector_quantized.pth", map_location=torch.device('cpu'), weights_only=False)
+def _encode_byte(byte):
+    result = []
+    for i in range(7, -1, -1):
+        result.append(0b11100000 if byte & (1 << i) else 0b10000000)
+    return result
 
-# CHANGED: Force CPU usage (removed CUDA check)
-# WHY: Raspberry Pi doesn't have CUDA/GPU, always uses CPU
-device = torch.device("cpu")
-spatial.to(device)
+def _led_show(pixels):
+    data = []
+    for r, g, b in pixels:
+        data += _encode_byte(g) + _encode_byte(r) + _encode_byte(b)
+    data += [0] * 10
+    _spi.xfer2(data)
 
-# CHANGED: Set to eval mode immediately
-# WHY: Pi never trains, only does inference
-# eval() disables dropout and batch normalization training behavior
-spatial.eval()
+_led_active = threading.Event()
 
-# CHANGED: Reduced image size to match training (128 instead of 224)
-# WHY: Must match the input size the model was trained on
-# Smaller size = faster processing on Pi's limited CPU
-preprocess = transforms.Compose([
-    transforms.Resize(144),
-    transforms.CenterCrop(128),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                         std=[0.229, 0.224, 0.225])
-])
+def _led_thread():
+    while True:
+        if _led_active.is_set():
+            _led_show([(255, 220, 0)] * NUM_LEDS)
+            time.sleep(0.15)
+            _led_show([(0, 0, 0)] * NUM_LEDS)
+            time.sleep(0.15)
+        else:
+            _led_show([(0, 0, 0)] * NUM_LEDS)
+            time.sleep(0.1)
 
-# REMOVED: All training code (dataset loading, training loop, optimizer, etc.)
-# WHY: Pi only runs inference, training code wastes memory and storage
+threading.Thread(target=_led_thread, daemon=True).start()
+# --- end LED setup ---
 
-#---------------------INFERENCE-----------------------
+# Load YOLOv8-nano model
+print("Loading YOLOv8-nano model...")
+model = YOLO('yolov8n.pt')
 
-# CHANGED: Wrapped in a function for reusability
-# WHY: Easier to call repeatedly for real-time drone detection
-def detect_person(image):
-    with torch.inference_mode():
-        if not isinstance(image, Image.Image):
-            if len(image.shape) == 3 and image.shape[2] == 4:
-                image = image[:, :, :3]
-            # Picamera2 outputs RGB, convert directly to PIL
-            image = Image.fromarray(image)
+# Configure Pi Camera HD for maximum FPS at full resolution
+picam2 = Picamera2()
+config = picam2.create_preview_configuration(
+    main={"size": (1920, 1080)},  # Full HD resolution
+    controls={
+        "FrameRate": 30,           # Maximum FPS
+        "AeEnable": True,          # Auto-exposure enabled
+        "AwbEnable": True,         # Auto white balance
+        "Brightness": 0.1          # Slight brightness boost
+    }
+)
+picam2.configure(config)
+picam2.start()
+
+time.sleep(2)
+
+# Debug: Check actual camera resolution
+test_frame = picam2.capture_array()
+print(f"Actual camera resolution: {test_frame.shape[1]}x{test_frame.shape[0]}")
+print("Full HD Search and Rescue Mode - Press 'q' to quit, 's' to save")
+
+frame_count = 0
+detection_counter = 0
+latest_detections = []
+
+# Threading for non-blocking detection
+detection_queue = Queue(maxsize=1)
+
+def detection_worker():
+    while True:
+        frame = detection_queue.get()
+        if frame is None:
+            break
         
-        input_tensor = preprocess(image)
-        input_batch = input_tensor.unsqueeze(0).to(device)
-        output = spatial(input_batch)
-        
-        probabilities = torch.nn.functional.softmax(output[0], dim=0)
-        confidence, predicted_idx = torch.max(probabilities, 0)
-    
-    classes = ["no_person", "person"]
-    prediction = classes[predicted_idx.item()]
-    
-    return prediction, confidence.item(), probabilities
+        # Run YOLO detection on full HD frame
+        results = model(frame, classes=[0], verbose=False)
+        global latest_detections
+        latest_detections = results[0].boxes if results[0].boxes is not None else []
+        detection_queue.task_done()
 
-if __name__ == "__main__":
-    picam2 = Picamera2()
-    config = picam2.create_preview_configuration(main={"size": (640, 480)})
-    picam2.configure(config)
-    picam2.start()
-    
-    time.sleep(2)
-    print("Camera started. Press 'q' to quit, 's' to save.")
-    frame_count = 0
-    
-    try:
-        while True:
-            frame = picam2.capture_array()
+# Start detection thread
+detection_thread = threading.Thread(target=detection_worker, daemon=True)
+detection_thread.start()
+
+try:
+    while True:
+        frame = picam2.capture_array()
+        
+        if len(frame.shape) == 3 and frame.shape[2] == 4:
+            frame = frame[:, :, :3]
+        
+        # Run detection on every frame
+        detection_counter += 1
+        if detection_queue.qsize() == 0:
+            detection_queue.put(frame.copy())
+        
+        # Convert RGB to BGR for display
+        display_frame = cv.cvtColor(frame, cv.COLOR_RGB2BGR)
+        
+        # Use latest detections (from previous frames)
+        person_count = len(latest_detections)
+        _led_active.set() if person_count > 0 else _led_active.clear()
+        
+        # Draw bounding boxes using latest detections
+        for box in latest_detections:
+            x1, y1, x2, y2 = map(int, box.xyxy[0])
+            conf = float(box.conf[0])
             
-            if len(frame.shape) == 3 and frame.shape[2] == 4:
-                frame = frame[:, :, :3]
+            # Draw box with thicker lines for HD
+            cv.rectangle(display_frame, (x1, y1), (x2, y2), (0, 255, 0), 3)
             
-            frame = np.ascontiguousarray(frame)
-            
-            prediction, confidence, probs = detect_person(frame)
-            
-            # Convert RGB to BGR for OpenCV display
-            display_frame = cv.cvtColor(frame, cv.COLOR_RGB2BGR)
-            
-            color = (0, 255, 0) if prediction == "person" else (0, 0, 255)
-            text = f"{prediction}: {confidence:.1%}"
-            debug_text = f"no_p:{probs[0].item():.2f} p:{probs[1].item():.2f}"
-            
-            cv.putText(display_frame, text, (10, 30), cv.FONT_HERSHEY_SIMPLEX, 1, color, 2)
-            cv.putText(display_frame, debug_text, (10, 70), cv.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-            
-            cv.imshow('Person Detection', display_frame)
-            
-            key = cv.waitKey(1) & 0xFF
-            if key == ord('q'):
-                break
-            elif key == ord('s'):
-                filename = f"frame_{frame_count}.jpg"
-                cv.imwrite(filename, display_frame)
-                print(f"Saved {filename}")
-                frame_count += 1
-    
-    except KeyboardInterrupt:
-        print("\nStopping...")
-    finally:
-        picam2.stop()
-        cv.destroyAllWindows()
+            # Draw label with larger font for HD
+            label = f"Person {conf:.2f}"
+            cv.putText(display_frame, label, (x1, y1-15), 
+                      cv.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 3)
+        
+        # Display count with larger text for HD
+        status = f"SURVIVORS: {person_count}" if person_count > 0 else "SEARCHING..."
+        color = (0, 255, 0) if person_count > 0 else (0, 0, 255)
+        cv.putText(display_frame, status, (20, 60), 
+                  cv.FONT_HERSHEY_SIMPLEX, 2, color, 4)
+        
+        # Show actual frame dimensions
+        info = f"Frame: {frame.shape[1]}x{frame.shape[0]} | Detection: Every frame"
+        cv.putText(display_frame, info, (20, display_frame.shape[0]-30), 
+                  cv.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+        
+        # Create full-size window and display
+        cv.namedWindow('Search and Rescue', cv.WINDOW_NORMAL)
+        cv.resizeWindow('Search and Rescue', 1920, 1080)
+        cv.imshow('Search and Rescue', display_frame)
+        
+        key = cv.waitKey(1) & 0xFF
+        if key == ord('q'):
+            break
+        elif key == ord('s'):
+            filename = f"rescue_{frame_count}.jpg"
+            cv.imwrite(filename, display_frame)
+            print(f"Saved {filename} - {person_count} person(s) detected")
+            frame_count += 1
+
+except KeyboardInterrupt:
+    pass
+finally:
+    detection_queue.put(None)  # Stop detection thread
+    picam2.stop()
+    cv.destroyAllWindows()
+    _led_show([(0, 0, 0)] * NUM_LEDS)
+    _spi.close()
